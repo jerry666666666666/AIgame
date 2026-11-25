@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>网页版桌球 🎱</title>
   <style>
     /* ========== CSS：负责页面长什么样 ========== */
@@ -47,6 +48,9 @@
     canvas {
       max-width: 100%;
       height: auto;
+      touch-action: none;   /* 手机上的触摸交给游戏处理，页面不跟着滚动 */
+      user-select: none;
+      -webkit-user-select: none;
       border-radius: 14px;
       box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
       cursor: crosshair;
@@ -67,7 +71,7 @@
 
   <!-- 游戏发生的舞台：一块 1000x500 的画布 -->
   <canvas id="table" width="1000" height="500"></canvas>
-  <p class="hint">移动鼠标瞄准 · 按住左键蓄力 · 松开击球</p>
+  <p class="hint">移动鼠标瞄准 · 按住并向球后方拖动蓄力（拖得越远力量越大）· 松开击球 · 手机触屏同样操作</p>
 
   <script>
     // ================= 1. 球桌基本参数 =================
@@ -151,10 +155,10 @@
           else moving = true;
         }
         // 撞到四条库边就反弹
-        if (b.x - b.r < LEFT)   { b.x = LEFT + b.r;   b.vx =  Math.abs(b.vx) * CUSHION_B; }
-        if (b.x + b.r > RIGHT)  { b.x = RIGHT - b.r;  b.vx = -Math.abs(b.vx) * CUSHION_B; }
-        if (b.y - b.r < TOP)    { b.y = TOP + b.r;    b.vy =  Math.abs(b.vy) * CUSHION_B; }
-        if (b.y + b.r > BOTTOM) { b.y = BOTTOM - b.r; b.vy = -Math.abs(b.vy) * CUSHION_B; }
+        if (b.x - b.r < LEFT)   { b.x = LEFT + b.r;   b.vx =  Math.abs(b.vx) * CUSHION_B; playSound('cushion', sp / 20); }
+        if (b.x + b.r > RIGHT)  { b.x = RIGHT - b.r;  b.vx = -Math.abs(b.vx) * CUSHION_B; playSound('cushion', sp / 20); }
+        if (b.y - b.r < TOP)    { b.y = TOP + b.r;    b.vy =  Math.abs(b.vy) * CUSHION_B; playSound('cushion', sp / 20); }
+        if (b.y + b.r > BOTTOM) { b.y = BOTTOM - b.r; b.vy = -Math.abs(b.vy) * CUSHION_B; playSound('cushion', sp / 20); }
       }
       // 球与球两两碰撞
       for (let i = 0; i < balls.length; i++) {
@@ -169,6 +173,7 @@
           if (Math.hypot(b.x - p.x, b.y - p.y) < POCKET_R) {
             b.active = false;
             b.vx = b.vy = 0;
+            playSound('pocket', 1);
             if (b === cue) {
               cueRespawnPending = true;    // 白球稍后放回
             } else {
@@ -192,6 +197,7 @@
       if (dvn <= 0) return;                          // 正在分离，不管
       a.vx -= dvn * nx * BALL_B;  a.vy -= dvn * ny * BALL_B;
       b.vx += dvn * nx * BALL_B;  b.vy += dvn * ny * BALL_B;
+      playSound('hit', dvn / 15);   // 撞击音，力度越大越响
       // 把重叠的两个球各推开一半，防止粘在一起
       const overlap = (a.r + b.r - dist) / 2;
       a.x -= nx * overlap;  a.y -= ny * overlap;
@@ -214,37 +220,121 @@
 
     // ================= 4. 玩家操作 =================
     const mouse = { x: 0, y: 0 };
-    let charging = false;   // 是否正在蓄力
-    let chargeT = 0;        // 蓄力计时
-    let power = 0;          // 当前力量 0~1
+    let charging = false;         // 是否正在蓄力（按住中）
+    let aimAng = 0;               // 按下瞬间锁定的瞄准角度
+    let pressX = 0, pressY = 0;   // 按下的位置
+    let power = 0;                // 当前力量 0~1
+    const MAX_DRAG = 130;         // 向后拖 130 像素 = 满力
 
-    canvas.addEventListener('mousemove', e => {
+    // 把屏幕坐标换算成画布坐标（页面缩放时也能对准）
+    function setPointer(cx, cy) {
       const rect = canvas.getBoundingClientRect();
-      mouse.x = (e.clientX - rect.left) * (W / rect.width);
-      mouse.y = (e.clientY - rect.top) * (H / rect.height);
-    });
+      mouse.x = (cx - rect.left) * (W / rect.width);
+      mouse.y = (cy - rect.top) * (H / rect.height);
+    }
 
-    canvas.addEventListener('mousedown', () => {
+    // 按下：锁定瞄准方向，开始蓄力
+    function press(cx, cy) {
       if (moving) return;              // 球还在动就不能打
+      setPointer(cx, cy);
       charging = true;
-      chargeT = 0;
+      pressX = mouse.x;
+      pressY = mouse.y;
+      aimAng = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);  // 方向在按下时锁死
       power = 0;
-    });
+      powerBar.style.width = '0%';
+      ensureAudio();                   // 浏览器要求：用户点过之后才能播放声音
+    }
 
-    window.addEventListener('mouseup', () => {
+    // 拖动：力量 = 沿"球后方"方向拖动的距离
+    function drag(cx, cy) {
+      setPointer(cx, cy);
+      if (!charging) return;
+      const backX = -Math.cos(aimAng), backY = -Math.sin(aimAng);   // 球后方的方向
+      const d = (mouse.x - pressX) * backX + (mouse.y - pressY) * backY;  // 投影
+      power = Math.max(0, Math.min(1, d / MAX_DRAG));
+      powerBar.style.width = (power * 100).toFixed(1) + '%';
+    }
+
+    // 松开：击球
+    function release() {
       if (!charging) return;
       charging = false;
+      powerBar.style.width = '0%';
       if (power > 0.05 && cue.active && !moving && sunkCount < OBJECT_COUNT) {
-        const dx = mouse.x - cue.x, dy = mouse.y - cue.y;
-        const d = Math.hypot(dx, dy) || 1;
-        cue.vx = (dx / d) * power * MAX_POWER;   // 朝鼠标方向击球
-        cue.vy = (dy / d) * power * MAX_POWER;
+        cue.vx = Math.cos(aimAng) * power * MAX_POWER;
+        cue.vy = Math.sin(aimAng) * power * MAX_POWER;
         shots++;
         document.getElementById('shots').textContent = shots;
+        playSound('shoot', power);
       }
-    });
+    }
 
+    // 鼠标事件
+    canvas.addEventListener('mousemove', e => drag(e.clientX, e.clientY));
+    canvas.addEventListener('mousedown', e => press(e.clientX, e.clientY));
+    window.addEventListener('mouseup', release);
     canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+    // 触屏事件：和鼠标共用同一套逻辑（手机就能玩了）
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      press(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      drag(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchend', e => {
+      e.preventDefault();
+      release();
+    }, { passive: false });
+
+    // ================= 4.5 音效（Web Audio 现场合成，不需要音频文件） =================
+    let audioCtx = null;
+    let lastSnd = 0;
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    // 基础发音函数：频率 + 时长 + 音量 + 波形
+    function blip(freq, dur, vol, type) {
+      if (!audioCtx) return;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type || 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+      o.connect(g).connect(audioCtx.destination);
+      o.start();
+      o.stop(audioCtx.currentTime + dur);
+    }
+
+    function playSound(kind, strength) {
+      if (!audioCtx) return;
+      strength = Math.max(0.05, Math.min(1, strength));
+      if (kind === 'hit') {                 // 球碰球：清脆短音
+        const now = performance.now();
+        if (now - lastSnd < 40) return;     // 一杆炸开时别响成一团
+        lastSnd = now;
+        blip(1800 + strength * 800, 0.06, strength * 0.22, 'triangle');
+      } else if (kind === 'cushion') {      // 撞库边：低沉"咚"
+        const now = performance.now();
+        if (now - lastSnd < 40) return;
+        lastSnd = now;
+        blip(140, 0.1, strength * 0.3, 'square');
+      } else if (kind === 'pocket') {       // 进球：两声下滑音
+        blip(500, 0.25, 0.3, 'sine');
+        setTimeout(() => blip(300, 0.3, 0.25, 'sine'), 60);
+      } else if (kind === 'shoot') {        // 出杆
+        blip(900, 0.05, strength * 0.2, 'square');
+      }
+    }
 
     document.getElementById('restart').addEventListener('click', () => {
       rack();
@@ -307,7 +397,7 @@
 
     function drawAim() {
       if (!cue.active || moving || sunkCount >= OBJECT_COUNT) return;
-      const ang = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
+      const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
       ctx.save();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
       ctx.setLineDash([6, 9]);
@@ -360,8 +450,8 @@
 
     function drawCue() {
       if (!cue.active || moving) return;
-      const ang = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
-      const pull = charging ? power * 45 : 8;      // 蓄力时杆向后拉
+      const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
+      const pull = charging ? power * 55 : 6;      // 蓄力时杆随拖动向后拉
       const dist = cue.r + 4 + pull;
       ctx.save();
       ctx.translate(cue.x - Math.cos(ang) * dist, cue.y - Math.sin(ang) * dist);
@@ -404,19 +494,13 @@
         cueRespawnPending = false;
       }
       update();
-      // 蓄力条：力量用余弦函数来回摆动，方便抓时机
-      if (charging) {
-        chargeT++;
-        power = (1 - Math.cos(chargeT * 0.06)) / 2;
-        powerBar.style.width = (power * 100).toFixed(1) + '%';
-      } else {
-        powerBar.style.width = '0%';
-      }
       draw();
       requestAnimationFrame(loop);   // 下一帧继续，形成 60 帧/秒的循环
     }
 
     rack();
+    mouse.x = cue.x + 200;   // 初始瞄准方向：水平向右（避免手机首屏球杆朝左上角）
+    mouse.y = cue.y;
     loop();
   </script>
 </body>
