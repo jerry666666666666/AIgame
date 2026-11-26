@@ -442,6 +442,22 @@
       o.stop(audioCtx.currentTime + dur);
     }
 
+    // 撞库边的"咚"：正弦波频率从 160Hz 快速滑到 55Hz，短促衰减
+    // （正弦波音色柔和；频率下滑模拟撞击后能量衰减的闷响）
+    function thud(vol) {
+      if (!audioCtx) return;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(160, audioCtx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(55, audioCtx.currentTime + 0.09);
+      g.gain.setValueAtTime(vol, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
+      o.connect(g).connect(audioCtx.destination);
+      o.start();
+      o.stop(audioCtx.currentTime + 0.13);
+    }
+
     function playSound(kind, strength) {
       if (!audioCtx) return;
       strength = Math.max(0.05, Math.min(1, strength));
@@ -450,11 +466,11 @@
         if (now - lastSnd < 40) return;     // 一杆炸开时别响成一团
         lastSnd = now;
         blip(1800 + strength * 800, 0.06, strength * 0.22, 'triangle');
-      } else if (kind === 'cushion') {      // 撞库边：低沉"咚"
+      } else if (kind === 'cushion') {      // 撞库边：低频"咚"（闷响）
         const now = performance.now();
         if (now - lastSnd < 40) return;
         lastSnd = now;
-        blip(140, 0.1, strength * 0.3, 'square');
+        thud(strength * 0.4);
       } else if (kind === 'pocket') {       // 进球：两声下滑音
         blip(500, 0.25, 0.3, 'sine');
         setTimeout(() => blip(300, 0.3, 0.25, 'sine'), 60);
@@ -625,25 +641,25 @@
 
     function drawCue() {
       if (gameState !== 'play' || !cue.active || moving) return;
-      // 杆尾贴着指针：杆尾离球心的距离 = 指针离球心的距离（限制在合理范围）
-      const dx = cue.x - mouse.x, dy = cue.y - mouse.y;
-      const buttDist = Math.max(45, Math.min(280, Math.hypot(dx, dy)));
-      const ang = Math.atan2(dy, dx);   // 从杆尾指向球
-      const front = buttDist - cue.r - 5;   // 杆身前端（离球面留 5px）
+      // 球杆固定长度；蓄力 = 整根杆沿轴线向后平移（杆头离开球面），不是变长
+      const ang = aimAng;
+      const LEN = 180;                             // 杆身固定长度
+      const pull = charging ? 6 + power * 60 : 6;  // 蓄力时杆向后拉，最大 60px
+      const butt = cue.r + 4 + pull + LEN;         // 杆尾离球心的距离
       ctx.save();
-      ctx.translate(cue.x - Math.cos(ang) * buttDist, cue.y - Math.sin(ang) * buttDist);
+      ctx.translate(cue.x - Math.cos(ang) * butt, cue.y - Math.sin(ang) * butt);
       ctx.rotate(ang);
-      // rotate 之后 +x 指向球。杆身从 0（杆尾）画到 front（前端），不会穿过球
-      const g = ctx.createLinearGradient(0, 0, front, 0);
+      // rotate 之后 +x 指向球。杆身从 0（杆尾）到 LEN（前端），整杆向后平移
+      const g = ctx.createLinearGradient(0, 0, LEN, 0);
       g.addColorStop(0, '#5a3415');
       g.addColorStop(1, '#e8c48a');
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.roundRect(0, -3.5, front, 7, 3);
+      ctx.roundRect(0, -3.5, LEN, 7, 3);
       ctx.fill();
       ctx.fillStyle = '#3d6fb4';        // 蓝色皮头（贴球一端）
       ctx.beginPath();
-      ctx.roundRect(front - 7, -3.6, 8, 7.2, 2);
+      ctx.roundRect(LEN - 7, -3.6, 8, 7.2, 2);
       ctx.fill();
       ctx.restore();
     }
