@@ -88,11 +88,11 @@
     const LEFT = RAIL, RIGHT = W - RAIL, TOP = RAIL, BOTTOM = H - RAIL;
     const HEAD_X = LEFT + (RIGHT - LEFT) / 4;   // 开球线位置（桌长 1/4 处）
     const BALL_R = 12;            // 球的半径
-    const FRICTION = 0.983;       // 摩擦系数：每帧速度保留的比例（越接近 1 摩擦越小、滚得越远）
+    const FRICTION = 0.986;       // 摩擦系数：每帧速度保留的比例（越接近 1 摩擦越小、滚得越远）
     const STOP = 0.08;            // 速度低于这个值就当作停下
     const CUSHION_B = 0.85;       // 撞库边的弹性
     const BALL_B = 0.96;          // 球与球碰撞的弹性
-    const MAX_POWER = 16;         // 满力时的初速度
+    const MAX_POWER = 13;         // 满力时的初速度
     const DEAD = 30;              // 离白球 30 像素以内 = 零力量（防止误触）
     const RANGE = 200;            // 再拉远 200 像素 = 满力
 
