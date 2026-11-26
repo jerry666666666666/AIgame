@@ -92,7 +92,8 @@
     const CUSHION_B = 0.85;       // 撞库边的弹性
     const BALL_B = 0.96;          // 球与球碰撞的弹性
     const MAX_POWER = 22;         // 满力时的初速度
-    const MAX_DRAG = 130;         // 向后拖 130 像素 = 满力
+    const DEAD = 30;              // 离白球 30 像素以内 = 零力量（防止误触）
+    const RANGE = 130;            // 再拉远 130 像素 = 满力
 
     // 6 个球袋的位置（四角 + 两条长边中间）
     const POCKET_R = 26;
@@ -312,8 +313,7 @@
     // ================= 4. 玩家操作 =================
     const mouse = { x: 0, y: 0 };
     let charging = false;   // 是否正在蓄力（按住中）
-    let aimAng = 0;         // 当前瞄准角度（蓄力期间持续跟随指针）
-    let pull = 0;           // 本次蓄力累计后拉距离
+    let aimAng = 0;         // 当前瞄准角度（指针在杆尾，瞄准 = 指针的反方向）
     let power = 0;          // 当前力量 0~1
 
     // 把屏幕坐标换算成画布坐标（页面缩放时也能对准）
@@ -331,33 +331,32 @@
         if (!cueOverlap) {             // 没压到别的球才能确认
           cue.active = true;
           gameState = 'play';
-          setHint('瞄准：指针指向目标 · 按住并向球后方拖动蓄力 · 松开击球');
+          setHint('指针=球杆尾端：杆从指针穿过白球指向目标 · 把指针拉离白球=蓄力 · 松开击球');
           updateStatus();
         }
         return;
       }
       if (gameState !== 'play' || moving) return;
       charging = true;
-      pull = 0;
-      power = 0;
-      aimAng = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
-      powerBar.style.width = '0%';
+      updateAimAndPower();      // 按下瞬间就按指针位置计算方向和力量
     }
 
-    // 拖动：方向随时跟随指针（蓄力时也能转动方向），
-    // 力量 = 沿"球杆轴向后"拖动的累计距离（转方向不会损失已蓄的力）
+    // 指针 = 球杆尾端（8 Ball Pool 同款操作）：
+    // 瞄准方向 = 从指针穿过白球指向对面；力量 = 指针离白球的距离（拉杆越远力量越大）。
+    // 绕白球转圈 = 转向（力量不变），径向拉远 = 蓄力，方向和力量互不干扰。
+    function updateAimAndPower() {
+      const dx = cue.x - mouse.x, dy = cue.y - mouse.y;
+      const dist = Math.hypot(dx, dy);
+      aimAng = Math.atan2(dy, dx);       // 杆尾→球 的方向
+      if (!charging) return;
+      power = Math.max(0, Math.min(1, (dist - DEAD) / RANGE));
+      powerBar.style.width = (power * 100).toFixed(1) + '%';
+    }
+
     function drag(cx, cy) {
-      const px = mouse.x, py = mouse.y;
       setPointer(cx, cy);
       if (gameState === 'place') { moveCueForPlacement(); return; }
-      if (!charging) return;
-      const dxb = mouse.x - cue.x, dyb = mouse.y - cue.y;
-      if (Math.hypot(dxb, dyb) > 15) aimAng = Math.atan2(dyb, dxb);  // 离球太近方向会抖，保持原角度
-      const backX = -Math.cos(aimAng), backY = -Math.sin(aimAng);   // 球后方的方向
-      const d = (mouse.x - px) * backX + (mouse.y - py) * backY;    // 本帧位移在杆轴上的投影
-      if (d > 0) pull += d;
-      power = Math.min(1, pull / MAX_DRAG);
-      powerBar.style.width = (power * 100).toFixed(1) + '%';
+      updateAimAndPower();
     }
 
     // 松开：击球
@@ -546,7 +545,7 @@
 
     function drawAim() {
       if (gameState !== 'play' || !cue.active || moving) return;
-      const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
+      const ang = aimAng;   // aimAng 随时由指针位置维护（杆尾→球）
       ctx.save();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
       ctx.setLineDash([6, 9]);
@@ -626,24 +625,25 @@
 
     function drawCue() {
       if (gameState !== 'play' || !cue.active || moving) return;
-      const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
-      const pull = charging ? power * 55 : 6;      // 蓄力时杆随拖动向后拉
-      const dist = cue.r + 4 + pull;
+      // 杆尾贴着指针：杆尾离球心的距离 = 指针离球心的距离（限制在合理范围）
+      const dx = cue.x - mouse.x, dy = cue.y - mouse.y;
+      const buttDist = Math.max(45, Math.min(280, Math.hypot(dx, dy)));
+      const ang = Math.atan2(dy, dx);   // 从杆尾指向球
+      const front = buttDist - cue.r - 5;   // 杆身前端（离球面留 5px）
       ctx.save();
-      ctx.translate(cue.x - Math.cos(ang) * dist, cue.y - Math.sin(ang) * dist);
+      ctx.translate(cue.x - Math.cos(ang) * buttDist, cue.y - Math.sin(ang) * buttDist);
       ctx.rotate(ang);
-      // 关键：rotate 之后，+x 轴指向球，-x 轴远离球。
-      // 杆身必须向 -x 延伸（远离球），否则会穿过球体朝鼠标戳出去。
-      const g = ctx.createLinearGradient(0, 0, -180, 0);
-      g.addColorStop(0, '#e8c48a');
-      g.addColorStop(1, '#5a3415');
+      // rotate 之后 +x 指向球。杆身从 0（杆尾）画到 front（前端），不会穿过球
+      const g = ctx.createLinearGradient(0, 0, front, 0);
+      g.addColorStop(0, '#5a3415');
+      g.addColorStop(1, '#e8c48a');
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.roundRect(-180, -3.5, 180, 7, 3);
+      ctx.roundRect(0, -3.5, front, 7, 3);
       ctx.fill();
-      ctx.fillStyle = '#3d6fb4';        // 蓝色皮头
+      ctx.fillStyle = '#3d6fb4';        // 蓝色皮头（贴球一端）
       ctx.beginPath();
-      ctx.roundRect(-7, -3.6, 8, 7.2, 2);
+      ctx.roundRect(front - 7, -3.6, 8, 7.2, 2);
       ctx.fill();
       ctx.restore();
     }
@@ -682,7 +682,7 @@
     }
 
     rack();
-    mouse.x = cue.x + 200;   // 初始瞄准方向：水平向右（避免手机首屏球杆朝左上角）
+    mouse.x = cue.x - 200;   // 初始指针在白球左侧 → 瞄准方向水平向右（指向球堆）
     mouse.y = cue.y;
     enterPlace('kitchen');
     loop();
