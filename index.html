@@ -23,8 +23,11 @@
     #toolbar {
       display: flex; align-items: center; gap: 18px;
       font-size: 15px;
+      flex-wrap: wrap;
+      justify-content: center;
     }
     #toolbar b { color: #ffd76e; }
+    #status { color: #8fd0ff; font-weight: bold; }
     /* 力量条：外壳 + 内部填充 */
     #powerBarWrap {
       width: 170px; height: 14px;
@@ -60,18 +63,19 @@
 </head>
 <body>
   <!-- HTML：负责页面有什么 -->
-  <h1>🎱 网页版桌球</h1>
+  <h1>🎱 网页版桌球（中式八球规则）</h1>
 
   <div id="toolbar">
-    <span>已进球：<b id="sunk">0</b> / 8</span>
+    <span>已进球：<b id="sunk">0</b> / 15</span>
     <span>击球次数：<b id="shots">0</b></span>
+    <span id="status">开球阶段</span>
     <div id="powerBarWrap"><div id="powerBar"></div></div>
     <button id="restart">重新开始</button>
   </div>
 
   <!-- 游戏发生的舞台：一块 1000x500 的画布 -->
   <canvas id="table" width="1000" height="500"></canvas>
-  <p class="hint">移动鼠标瞄准 · 按住并向球后方拖动蓄力（拖得越远力量越大）· 松开击球 · 手机触屏同样操作</p>
+  <p class="hint" id="hint">开球：把白球拖到开球区（虚线左侧），点击确认</p>
 
   <script>
     // ================= 1. 球桌基本参数 =================
@@ -81,13 +85,14 @@
 
     const RAIL = 45;              // 木头库边的宽度
     const LEFT = RAIL, RIGHT = W - RAIL, TOP = RAIL, BOTTOM = H - RAIL;
+    const HEAD_X = LEFT + (RIGHT - LEFT) / 4;   // 开球线位置（桌长 1/4 处）
     const BALL_R = 12;            // 球的半径
-    const OBJECT_COUNT = 8;       // 目标球数量
     const FRICTION = 0.985;       // 摩擦系数：每帧速度保留的比例
     const STOP = 0.08;            // 速度低于这个值就当作停下
     const CUSHION_B = 0.85;       // 撞库边的弹性
     const BALL_B = 0.96;          // 球与球碰撞的弹性
     const MAX_POWER = 22;         // 满力时的初速度
+    const MAX_DRAG = 130;         // 向后拖 130 像素 = 满力
 
     // 6 个球袋的位置（四角 + 两条长边中间）
     const POCKET_R = 26;
@@ -100,39 +105,124 @@
       { x: W / 2,     y: BOTTOM + 6 },
     ];
 
-    // ================= 2. 球的数据 =================
-    const COLORS = ['#f6c21a', '#2e63d9', '#e03a3a', '#7b3fd1',
-                    '#f08c1a', '#1e9e4a', '#8a2f1e', '#141414'];
+    // ================= 2. 球的数据与规则状态 =================
+    // 1-7 全色球的标准颜色；9-15 花色球用相同颜色（画成白底彩带）
+    const SOLID_COLORS = { 1: '#f6c21a', 2: '#2e63d9', 3: '#e03a3a', 4: '#7b3fd1',
+                           5: '#f08c1a', 6: '#1e9e4a', 7: '#8a2f1e' };
+
     let balls = [];          // 场上所有球（含白球）
     let cue = null;          // 白球的引用
+    let eight = null;        // 黑8的引用
     let shots = 0;           // 击球次数
     let sunkCount = 0;       // 已进袋的目标球数
-    let cueRespawnPending = false;  // 白球是否等待重新放回
+    let playerGroup = null;  // 你的花色：null=未定 / 'solid'全色 / 'stripe'花色
+    let gameState = 'place'; // 'place'=摆放白球 / 'play'=正常击球 / 'won' / 'lost'
+    let placeZone = 'kitchen'; // 摆放阶段允许的区域：'kitchen'开球区 / 'anywhere'自由球
+    let cueOverlap = false;  // 摆放时白球是否压住了别的球
+    let pendingBreak = true; // 下一杆是不是开球
+    let currentShotIsBreak = false;  // 正在滚动的这一杆是不是开球
+    let shootingEight = false;       // 正在滚动的这一杆是不是"打黑8阶段"
+    let lossReason = '';     // 判负原因
+    let eightRespawnPending = false;   // 黑8（开球进袋）等待重摆
+    let cueBallInHandPending = false;  // 白球进袋后等待自由球摆放
 
     // 每个球就是一个"对象"：坐标 + 速度 + 颜色 + 状态
-    function makeBall(x, y, color, num) {
-      return { x, y, vx: 0, vy: 0, r: BALL_R, color, num, active: true };
+    function makeBall(x, y, num) {
+      let group, color;
+      if (num === 0)      { group = 'cue';    color = '#f8f6ee'; }
+      else if (num === 8) { group = 'eight';  color = '#141414'; }
+      else if (num <= 7)  { group = 'solid';  color = SOLID_COLORS[num]; }
+      else                { group = 'stripe'; color = SOLID_COLORS[num - 8]; }
+      return { x, y, vx: 0, vy: 0, r: BALL_R, color, num, group, active: true };
     }
 
-    // 摆球：白球在左侧，8 个目标球在右侧摆成三角形
+    // 摆球：15 颗球摆成三角形（中式八球摆位）
+    // 黑8在第三排中间；最后排两角必须一颗全色一颗花色
     function rack() {
       balls = [];
-      cue = makeBall(LEFT + (RIGHT - LEFT) * 0.28, (TOP + BOTTOM) / 2, '#f8f6ee', 0);
+      const headX = LEFT + (RIGHT - LEFT) * 0.28, midY = (TOP + BOTTOM) / 2;
+      cue = makeBall(headX, midY, 0);
       balls.push(cue);
       const footX = LEFT + (RIGHT - LEFT) * 0.72;
-      const midY = (TOP + BOTTOM) / 2;
       const gap = BALL_R * 2 + 0.5;
-      const rows = [1, 2, 3, 2];
-      let n = 0;
-      for (let i = 0; i < rows.length; i++) {
-        for (let j = 0; j < rows[i]; j++) {
+      const order = [ [1], [9, 2], [10, 8, 3], [11, 4, 12, 13], [14, 5, 6, 15, 7] ];
+      for (let i = 0; i < order.length; i++) {
+        for (let j = 0; j < order[i].length; j++) {
           const x = footX + i * gap * 0.866;   // cos30° 让球错位排开
-          const y = midY + (j - (rows[i] - 1) / 2) * gap;
-          const b = makeBall(x, y, COLORS[n], n + 1);
+          const y = midY + (j - (order[i].length - 1) / 2) * gap;
+          const b = makeBall(x, y, order[i][j]);
           balls.push(b);
-          n++;
         }
       }
+      eight = balls.find(b => b.num === 8);
+    }
+
+    function myRemaining() {   // 本组还没进袋的球数
+      if (!playerGroup) return 0;
+      return balls.filter(b => b.active && b.group === playerGroup).length;
+    }
+
+    function setGroup(g) {
+      playerGroup = g;
+      playSound('group', 1);
+    }
+
+    function lose(reason) {
+      gameState = 'lost';
+      lossReason = reason;
+      playSound('lose', 1);
+    }
+
+    function winGame() {
+      gameState = 'won';
+      playSound('win', 1);
+    }
+
+    // 进入"摆放白球"阶段
+    function enterPlace(zone) {
+      gameState = 'place';
+      placeZone = zone;
+      cue.active = false;
+      cue.vx = cue.vy = 0;
+      if (zone === 'kitchen') { cue.x = (LEFT + HEAD_X) / 2; cue.y = (TOP + BOTTOM) / 2; }
+      setHint(zone === 'kitchen' ? '开球：把白球拖到开球区（虚线左侧），点击确认'
+                                 : '自由球：点击球台任意位置放置白球（不要压到球）');
+    }
+
+    // 摆放中：白球跟随指针，限制在允许区域内
+    function moveCueForPlacement() {
+      const minX = LEFT + BALL_R, maxX = (placeZone === 'kitchen' ? HEAD_X - BALL_R : RIGHT - BALL_R);
+      cue.x = Math.max(minX, Math.min(maxX, mouse.x));
+      cue.y = Math.max(TOP + BALL_R, Math.min(BOTTOM - BALL_R, mouse.y));
+      cueOverlap = balls.some(b => b !== cue && b.active &&
+        Math.hypot(b.x - cue.x, b.y - cue.y) < b.r + cue.r + 1);
+    }
+
+    // 黑8放回置球点（开球进黑8时）
+    function respawnEight() {
+      const footX = LEFT + (RIGHT - LEFT) * 0.72, midY = (TOP + BOTTOM) / 2;
+      eight.x = footX;
+      eight.y = midY;
+      eight.vx = eight.vy = 0;
+      for (const b of balls) {
+        if (b !== eight && b.active && Math.hypot(b.x - eight.x, b.y - eight.y) < b.r + eight.r + 1) {
+          eight.y -= b.r + eight.r + 2;
+        }
+      }
+      eight.active = true;
+    }
+
+    function setHint(t) { document.getElementById('hint').textContent = t; }
+
+    // 状态栏文字（每帧刷新，代价很小）
+    function updateStatus() {
+      const el = document.getElementById('status');
+      if (gameState === 'lost' || gameState === 'won') return;
+      if (gameState === 'place') { el.textContent = placeZone === 'kitchen' ? '开球阶段' : '自由球'; return; }
+      if (playerGroup === null) { el.textContent = '台面开放'; return; }
+      const left = myRemaining();
+      if (left === 0) el.textContent = '只剩黑8！';
+      else el.textContent = '你的花色：' + (playerGroup === 'solid' ? '全色' : '花色') + '，剩 ' + left + ' 颗';
     }
 
     // ================= 3. 物理更新 =================
@@ -166,7 +256,7 @@
           collide(balls[i], balls[j]);
         }
       }
-      // 球袋检测
+      // 球袋检测 + 中式八球规则判定
       for (const b of balls) {
         if (!b.active) continue;
         for (const p of pockets) {
@@ -174,15 +264,30 @@
             b.active = false;
             b.vx = b.vy = 0;
             playSound('pocket', 1);
-            if (b === cue) {
-              cueRespawnPending = true;    // 白球稍后放回
-            } else {
-              sunkCount++;
-              document.getElementById('sunk').textContent = sunkCount;
-            }
+            onBallPocketed(b);
             break;
           }
         }
+      }
+      updateStatus();
+    }
+
+    // 规则引擎：一颗球进袋后发生什么（白球在数组最前，会先于黑8判定）
+    function onBallPocketed(b) {
+      if (b === cue) {
+        if (shootingEight) lose('击打黑8时白球进袋，判负');
+        else cueBallInHandPending = true;   // 等球停稳后给自由球
+      } else if (b.num === 8) {
+        if (currentShotIsBreak) eightRespawnPending = true;   // 开球进黑8：取出重摆
+        else if (!cue.active) lose('黑8与白球同进，判负');
+        else if (shootingEight) winGame();
+        else lose('本组球未清完就进了黑8，判负');
+        if (!currentShotIsBreak) { sunkCount++; document.getElementById('sunk').textContent = sunkCount; }
+      } else {
+        // 开球进球不算定色（台面保持开放）；开球后第一次进球的花色 = 你的花色
+        if (!currentShotIsBreak && playerGroup === null) setGroup(b.group);
+        sunkCount++;
+        document.getElementById('sunk').textContent = sunkCount;
       }
     }
 
@@ -204,27 +309,12 @@
       b.x += nx * overlap;  b.y += ny * overlap;
     }
 
-    // 白球重新放回开球点
-    function respawnCue() {
-      cue.x = LEFT + (RIGHT - LEFT) * 0.28;
-      cue.y = (TOP + BOTTOM) / 2;
-      cue.vx = cue.vy = 0;
-      for (const b of balls) {
-        if (b !== cue && b.active &&
-            Math.hypot(b.x - cue.x, b.y - cue.y) < b.r + cue.r + 1) {
-          cue.y -= b.r + cue.r + 2;   // 出生点被占住就往上挪
-        }
-      }
-      cue.active = true;
-    }
-
     // ================= 4. 玩家操作 =================
     const mouse = { x: 0, y: 0 };
-    let charging = false;         // 是否正在蓄力（按住中）
-    let aimAng = 0;               // 按下瞬间锁定的瞄准角度
-    let pressX = 0, pressY = 0;   // 按下的位置
-    let power = 0;                // 当前力量 0~1
-    const MAX_DRAG = 130;         // 向后拖 130 像素 = 满力
+    let charging = false;   // 是否正在蓄力（按住中）
+    let aimAng = 0;         // 当前瞄准角度（蓄力期间持续跟随指针）
+    let pull = 0;           // 本次蓄力累计后拉距离
+    let power = 0;          // 当前力量 0~1
 
     // 把屏幕坐标换算成画布坐标（页面缩放时也能对准）
     function setPointer(cx, cy) {
@@ -233,26 +323,40 @@
       mouse.y = (cy - rect.top) * (H / rect.height);
     }
 
-    // 按下：锁定瞄准方向，开始蓄力
+    // 按下：摆放阶段=确认位置；击球阶段=开始蓄力
     function press(cx, cy) {
-      if (moving) return;              // 球还在动就不能打
       setPointer(cx, cy);
-      charging = true;
-      pressX = mouse.x;
-      pressY = mouse.y;
-      aimAng = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);  // 方向在按下时锁死
-      power = 0;
-      powerBar.style.width = '0%';
       ensureAudio();                   // 浏览器要求：用户点过之后才能播放声音
+      if (gameState === 'place') {
+        if (!cueOverlap) {             // 没压到别的球才能确认
+          cue.active = true;
+          gameState = 'play';
+          setHint('瞄准：指针指向目标 · 按住并向球后方拖动蓄力 · 松开击球');
+          updateStatus();
+        }
+        return;
+      }
+      if (gameState !== 'play' || moving) return;
+      charging = true;
+      pull = 0;
+      power = 0;
+      aimAng = Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
+      powerBar.style.width = '0%';
     }
 
-    // 拖动：力量 = 沿"球后方"方向拖动的距离
+    // 拖动：方向随时跟随指针（蓄力时也能转动方向），
+    // 力量 = 沿"球杆轴向后"拖动的累计距离（转方向不会损失已蓄的力）
     function drag(cx, cy) {
+      const px = mouse.x, py = mouse.y;
       setPointer(cx, cy);
+      if (gameState === 'place') { moveCueForPlacement(); return; }
       if (!charging) return;
+      const dxb = mouse.x - cue.x, dyb = mouse.y - cue.y;
+      if (Math.hypot(dxb, dyb) > 15) aimAng = Math.atan2(dyb, dxb);  // 离球太近方向会抖，保持原角度
       const backX = -Math.cos(aimAng), backY = -Math.sin(aimAng);   // 球后方的方向
-      const d = (mouse.x - pressX) * backX + (mouse.y - pressY) * backY;  // 投影
-      power = Math.max(0, Math.min(1, d / MAX_DRAG));
+      const d = (mouse.x - px) * backX + (mouse.y - py) * backY;    // 本帧位移在杆轴上的投影
+      if (d > 0) pull += d;
+      power = Math.min(1, pull / MAX_DRAG);
       powerBar.style.width = (power * 100).toFixed(1) + '%';
     }
 
@@ -261,13 +365,16 @@
       if (!charging) return;
       charging = false;
       powerBar.style.width = '0%';
-      if (power > 0.05 && cue.active && !moving && sunkCount < OBJECT_COUNT) {
-        cue.vx = Math.cos(aimAng) * power * MAX_POWER;
-        cue.vy = Math.sin(aimAng) * power * MAX_POWER;
-        shots++;
-        document.getElementById('shots').textContent = shots;
-        playSound('shoot', power);
-      }
+      if (power < 0.03 || gameState !== 'play' || moving || !cue.active) return;
+      // 出杆前锁定这一杆的属性：是不是开球？是不是打黑8阶段？
+      currentShotIsBreak = pendingBreak;
+      pendingBreak = false;
+      shootingEight = playerGroup !== null && myRemaining() === 0 && eight.active;
+      cue.vx = Math.cos(aimAng) * power * MAX_POWER;
+      cue.vy = Math.sin(aimAng) * power * MAX_POWER;
+      shots++;
+      document.getElementById('shots').textContent = shots;
+      playSound('shoot', power);
     }
 
     // 鼠标事件
@@ -289,6 +396,27 @@
       e.preventDefault();
       release();
     }, { passive: false });
+
+    document.getElementById('restart').addEventListener('click', () => {
+      rack();
+      shots = 0;
+      sunkCount = 0;
+      playerGroup = null;
+      pendingBreak = true;
+      currentShotIsBreak = false;
+      shootingEight = false;
+      lossReason = '';
+      eightRespawnPending = false;
+      cueBallInHandPending = false;
+      charging = false;
+      power = 0;
+      cueOverlap = false;
+      document.getElementById('sunk').textContent = 0;
+      document.getElementById('shots').textContent = 0;
+      document.getElementById('status').textContent = '开球阶段';
+      powerBar.style.width = '0%';
+      enterPlace('kitchen');
+    });
 
     // ================= 4.5 音效（Web Audio 现场合成，不需要音频文件） =================
     let audioCtx = null;
@@ -333,28 +461,29 @@
         setTimeout(() => blip(300, 0.3, 0.25, 'sine'), 60);
       } else if (kind === 'shoot') {        // 出杆
         blip(900, 0.05, strength * 0.2, 'square');
+      } else if (kind === 'group') {        // 定色提示音
+        blip(700, 0.12, 0.3, 'sine');
+        setTimeout(() => blip(1000, 0.15, 0.3, 'sine'), 100);
+      } else if (kind === 'win') {          // 胜利小琶音
+        [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.3, 0.3, 'sine'), i * 140));
+      } else if (kind === 'lose') {         // 判负低音
+        blip(220, 0.5, 0.35, 'sawtooth');
+        setTimeout(() => blip(150, 0.6, 0.35, 'sawtooth'), 250);
       }
     }
-
-    document.getElementById('restart').addEventListener('click', () => {
-      rack();
-      shots = 0;
-      sunkCount = 0;
-      cueRespawnPending = false;
-      charging = false;
-      document.getElementById('sunk').textContent = 0;
-      document.getElementById('shots').textContent = 0;
-    });
 
     // ================= 5. 绘制渲染 =================
     function draw() {
       drawFrame();
       drawFelt();
+      drawKitchenLine();
       drawPockets();
+      drawPlaceZone();
       drawAim();
       for (const b of balls) if (b.active) drawBall(b);
+      drawGhostCue();
       drawCue();
-      drawWin();
+      drawOverlay();
     }
 
     function drawFrame() {
@@ -383,6 +512,18 @@
       }
     }
 
+    function drawKitchenLine() {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.setLineDash([4, 6]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(HEAD_X, TOP); ctx.lineTo(HEAD_X, BOTTOM); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.font = '13px "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('开 球 区', (LEFT + HEAD_X) / 2, TOP - 26);
+    }
+
     function drawPockets() {
       for (const p of pockets) {
         ctx.beginPath();
@@ -395,8 +536,16 @@
       }
     }
 
+    // 摆放白球时高亮允许区域
+    function drawPlaceZone() {
+      if (gameState !== 'place') return;
+      ctx.fillStyle = 'rgba(120, 255, 160, 0.08)';
+      if (placeZone === 'kitchen') ctx.fillRect(LEFT, TOP, HEAD_X - LEFT, BOTTOM - TOP);
+      else ctx.fillRect(LEFT, TOP, RIGHT - LEFT, BOTTOM - TOP);
+    }
+
     function drawAim() {
-      if (!cue.active || moving || sunkCount >= OBJECT_COUNT) return;
+      if (gameState !== 'play' || !cue.active || moving) return;
       const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
       ctx.save();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
@@ -415,11 +564,20 @@
       ctx.ellipse(b.x + 3, b.y + 4, b.r, b.r * 0.8, 0, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
       ctx.fill();
-      // 球体
+      // 球体：花色球 = 白底 + 中间彩带
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-      ctx.fillStyle = b.color;
+      ctx.fillStyle = b.group === 'stripe' ? '#f8f6ee' : b.color;
       ctx.fill();
+      if (b.group === 'stripe') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+        ctx.clip();                                    // 彩带裁剪在圆形里
+        ctx.fillStyle = b.color;
+        ctx.fillRect(b.x - b.r, b.y - b.r * 0.45, b.r * 2, b.r * 0.9);
+        ctx.restore();
+      }
       // 高光（让球有立体感）
       const hl = ctx.createRadialGradient(
         b.x - b.r * 0.4, b.y - b.r * 0.45, 0,
@@ -448,8 +606,26 @@
       }
     }
 
+    // 摆放阶段：白球半透明跟随指针，压住别的球时变红提示
+    function drawGhostCue() {
+      if (gameState !== 'place') return;
+      ctx.globalAlpha = 0.65;
+      ctx.beginPath();
+      ctx.arc(cue.x, cue.y, cue.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#f8f6ee';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(cue.x, cue.y, cue.r + 2, 0, Math.PI * 2);
+      ctx.strokeStyle = cueOverlap ? 'rgba(255, 80, 80, 0.95)' : 'rgba(255, 255, 255, 0.7)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash(cueOverlap ? [5, 4] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     function drawCue() {
-      if (!cue.active || moving) return;
+      if (gameState !== 'play' || !cue.active || moving) return;
       const ang = charging ? aimAng : Math.atan2(mouse.y - cue.y, mouse.x - cue.x);
       const pull = charging ? power * 55 : 6;      // 蓄力时杆随拖动向后拉
       const dist = cue.r + 4 + pull;
@@ -472,26 +648,33 @@
       ctx.restore();
     }
 
-    function drawWin() {
-      if (sunkCount < OBJECT_COUNT) return;
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    // 胜负结算画面
+    function drawOverlay() {
+      if (gameState !== 'won' && gameState !== 'lost') return;
+      const win = gameState === 'won';
+      const cx = (LEFT + RIGHT) / 2, cy = (TOP + BOTTOM) / 2;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
       ctx.fillRect(LEFT, TOP, RIGHT - LEFT, BOTTOM - TOP);
-      ctx.fillStyle = '#fff';
       ctx.textAlign = 'center';
+      ctx.fillStyle = win ? '#7dffa8' : '#ff8f8f';
       ctx.font = 'bold 44px "Microsoft YaHei", sans-serif';
-      ctx.fillText('🎉 全部进袋！', (LEFT + RIGHT) / 2, (TOP + BOTTOM) / 2 - 12);
-      ctx.font = '20px "Microsoft YaHei", sans-serif';
-      ctx.fillText('共 ' + shots + ' 杆完成，点右上角重新开始',
-        (LEFT + RIGHT) / 2, (TOP + BOTTOM) / 2 + 32);
+      ctx.fillText(win ? '🎉 恭喜获胜！' : '❌ 判负', cx, cy - 24);
+      ctx.fillStyle = '#fff';
+      ctx.font = '19px "Microsoft YaHei", sans-serif';
+      ctx.fillText(win ? ('共 ' + shots + ' 杆完成') : lossReason, cx, cy + 22);
+      ctx.fillStyle = '#ccc';
+      ctx.font = '15px "Microsoft YaHei", sans-serif';
+      ctx.fillText('点右上角"重新开始"再来一局', cx, cy + 56);
     }
 
     // ================= 6. 游戏主循环 =================
     const powerBar = document.getElementById('powerBar');
 
     function loop() {
-      if (cueRespawnPending && !moving) {   // 所有球停稳后再放回白球
-        respawnCue();
-        cueRespawnPending = false;
+      // 等所有球停稳后，再处理"黑8重摆"和"自由球摆放"
+      if (!moving && (gameState === 'play' || gameState === 'place')) {
+        if (eightRespawnPending) { respawnEight(); eightRespawnPending = false; setHint('开球进黑8：已取出重摆，台面继续开放'); }
+        if (cueBallInHandPending) { cueBallInHandPending = false; enterPlace('anywhere'); }
       }
       update();
       draw();
@@ -501,6 +684,7 @@
     rack();
     mouse.x = cue.x + 200;   // 初始瞄准方向：水平向右（避免手机首屏球杆朝左上角）
     mouse.y = cue.y;
+    enterPlace('kitchen');
     loop();
   </script>
 </body>
