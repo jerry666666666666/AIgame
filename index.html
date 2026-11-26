@@ -18,6 +18,7 @@
       color: #eee;
       padding: 16px;
       gap: 12px;
+      overscroll-behavior: none;   /* 游戏操作时防止手机下拉刷新/回弹 */
     }
     h1 { font-size: 26px; letter-spacing: 3px; }
     #toolbar {
@@ -382,18 +383,53 @@
     window.addEventListener('mouseup', release);
     canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-    // 触屏事件：和鼠标共用同一套逻辑（手机就能玩了）
-    canvas.addEventListener('touchstart', e => {
+    // 触屏事件：挂在 window 上，整页都能操作（手指划出球桌也能继续蓄力）。
+    // activeTouchId 只跟踪"正在操作的那根手指"，多指互不干扰；
+    // 手指不在画布上时不接管，页面正常滚动。
+    let activeTouchId = null;
+
+    function isTouchOnCanvas(t) {
+      const rect = canvas.getBoundingClientRect();
+      return t.clientX >= rect.left && t.clientX <= rect.right &&
+             t.clientY >= rect.top && t.clientY <= rect.bottom;
+    }
+
+    window.addEventListener('touchstart', e => {
+      if (activeTouchId !== null) return;        // 已有一根手指在操作
+      const t = e.changedTouches[0];
+      if (!isTouchOnCanvas(t)) return;           // 画布外的触摸不接管
       e.preventDefault();
-      press(e.touches[0].clientX, e.touches[0].clientY);
+      activeTouchId = t.identifier;
+      press(t.clientX, t.clientY);
     }, { passive: false });
-    canvas.addEventListener('touchmove', e => {
+
+    window.addEventListener('touchmove', e => {
+      const t = e.changedTouches[0];
+      if (activeTouchId === null || t.identifier !== activeTouchId) return;
       e.preventDefault();
-      drag(e.touches[0].clientX, e.touches[0].clientY);
+      drag(t.clientX, t.clientY);
     }, { passive: false });
-    canvas.addEventListener('touchend', e => {
-      e.preventDefault();
-      release();
+
+    window.addEventListener('touchend', e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === activeTouchId) {
+          activeTouchId = null;
+          e.preventDefault();
+          release();
+        }
+      }
+    }, { passive: false });
+
+    // 系统打断手势（来电、下拉通知等）：安全取消本次操作
+    window.addEventListener('touchcancel', e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === activeTouchId) {
+          activeTouchId = null;
+          charging = false;
+          power = 0;
+          powerBar.style.width = '0%';
+        }
+      }
     }, { passive: false });
 
     document.getElementById('restart').addEventListener('click', () => {
