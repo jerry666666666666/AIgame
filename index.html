@@ -377,8 +377,8 @@
       playSound('shoot', power);
     }
 
-    // 鼠标事件
-    canvas.addEventListener('mousemove', e => drag(e.clientX, e.clientY));
+    // 鼠标事件：mousemove 挂在 window 上，拖出球桌也能继续蓄力
+    window.addEventListener('mousemove', e => drag(e.clientX, e.clientY));
     canvas.addEventListener('mousedown', e => press(e.clientX, e.clientY));
     window.addEventListener('mouseup', release);
     canvas.addEventListener('contextmenu', e => e.preventDefault());
